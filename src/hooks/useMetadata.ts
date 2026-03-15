@@ -13,6 +13,7 @@ import { mmkvStorage } from '../services/mmkvStorage';
 import { Stream } from '../types/metadata';
 import { storageService } from '../services/storageService';
 import { useSettings } from './useSettings';
+import { MalSync } from '../services/mal/MalSync';
 
 // Constants for timeouts and retries
 const API_TIMEOUT = 10000; // 10 seconds
@@ -113,6 +114,13 @@ interface UseMetadataReturn {
 
 export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadataReturn => {
   const { settings, isLoaded: settingsLoaded } = useSettings();
+
+  // Normalize anime subtypes to their base types for all internal logic.
+  // anime.series behaves like series; anime.movie behaves like movie.
+  const normalizedType = type === 'anime.series' ? 'series'
+    : type === 'anime.movie' ? 'movie'
+    : type;
+
   const [metadata, setMetadata] = useState<StreamingContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -426,7 +434,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
         return;
       }
       // Check cache first
-      const cachedCast = cacheService.getCast(id, type);
+      const cachedCast = cacheService.getCast(id, normalizedType);
       if (cachedCast) {
         if (__DEV__) logger.log('[loadCast] Using cached cast data');
         setCast(cachedCast);
@@ -438,7 +446,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
       if (id.startsWith('tmdb:')) {
         const tmdbId = id.split(':')[1];
         if (__DEV__) logger.log('[loadCast] Using TMDB ID directly:', tmdbId);
-        const castData = await tmdbService.getCredits(parseInt(tmdbId), type);
+        const castData = await tmdbService.getCredits(parseInt(tmdbId), normalizedType);
         if (castData && castData.cast) {
           const formattedCast = castData.cast.map((actor: any) => ({
             id: actor.id,
@@ -463,7 +471,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
 
       if (tmdbId) {
         if (__DEV__) logger.log('[loadCast] Fetching cast using TMDB ID:', tmdbId);
-        const castData = await tmdbService.getCredits(tmdbId, type);
+        const castData = await tmdbService.getCredits(tmdbId, normalizedType);
         if (castData && castData.cast) {
           const formattedCast = castData.cast.map((actor: any) => ({
             id: actor.id,
@@ -488,6 +496,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
 
   const loadMetadata = async () => {
     try {
+      console.log('🚀 [useMetadata] loadMetadata CALLED for:', { id, type });
       console.log('🔍 [useMetadata] loadMetadata started:', {
         id,
         type,
@@ -509,7 +518,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
       setLoadAttempts(prev => prev + 1);
 
       // Check metadata screen cache
-      const cachedScreen = cacheService.getMetadataScreen(id, type);
+      const cachedScreen = cacheService.getMetadataScreen(id, normalizedType);
       if (cachedScreen) {
         console.log('🔍 [useMetadata] Using cached metadata:', {
           id,
@@ -521,7 +530,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
         });
         setMetadata(cachedScreen.metadata);
         setCast(cachedScreen.cast);
-        if (type === 'series' && cachedScreen.episodes) {
+        if (normalizedType === 'series' && cachedScreen.episodes) {
           setGroupedEpisodes(cachedScreen.episodes.groupedEpisodes);
           setEpisodes(cachedScreen.episodes.currentEpisodes);
           setSelectedSeason(cachedScreen.episodes.selectedSeason);
@@ -541,6 +550,18 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
 
       // Handle TMDB-specific IDs
       let actualId = id;
+
+      // Handle MAL IDs
+      if (id.startsWith('mal:')) {
+          // STRICT MODE: Do NOT convert to IMDb/Cinemeta. 
+          // We want to force the app to use AnimeKitsu (or other MAL-compatible addons) for metadata.
+          // This ensures we get correct Season/Episode mapping (Separate entries) instead of Cinemeta's "S1E26" mess.
+          console.log('🔍 [useMetadata] Keeping MAL ID for metadata fetch:', id);
+          
+          // Note: Stream fetching (stremioService) WILL still convert this to IMDb secretly 
+          // to ensure Torrentio works, but the Metadata UI will stay purely MAL-based.
+      }
+
       if (id.startsWith('tmdb:')) {
         // Always try the original TMDB ID first - let addons decide if they support it
         console.log('🔍 [useMetadata] TMDB ID detected, trying original ID first:', { originalId: id });
@@ -553,7 +574,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
         } else {
           const tmdbId = id.split(':')[1];
           // For TMDB IDs, we need to handle metadata differently
-          if (type === 'movie') {
+          if (normalizedType === 'movie') {
             if (__DEV__) logger.log('Fetching movie details from TMDB for:', tmdbId);
             const movieDetails = await tmdbService.getMovieDetails(
               tmdbId,
@@ -625,7 +646,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
                 }
 
                 setMetadata(formattedMovie);
-                cacheService.setMetadata(id, type, formattedMovie);
+                cacheService.setMetadata(id, normalizedType, formattedMovie);
                 (async () => {
                   const items = await catalogService.getLibraryItems();
                   const isInLib = items.some(item => item.id === id);
@@ -635,7 +656,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
                 return;
               }
             }
-          } else if (type === 'series') {
+          } else if (normalizedType === 'series') {
             // Handle TV shows with TMDB IDs
             if (__DEV__) logger.log('Fetching TV show details from TMDB for:', tmdbId);
             try {
@@ -705,7 +726,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
                   }
 
                   setMetadata(formattedShow);
-                  cacheService.setMetadata(id, type, formattedShow);
+                  cacheService.setMetadata(id, normalizedType, formattedShow);
 
                   // Load series data (episodes)
                   setTmdbId(parseInt(tmdbId));
@@ -731,7 +752,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
       console.log('🔍 [useMetadata] Starting parallel data fetch:', { type, actualId, addonId, apiTimeout: API_TIMEOUT });
       if (__DEV__) logger.log('[loadMetadata] fetching addon metadata', { type, actualId, addonId });
 
-      let contentResult = null;
+      let contentResult: any = null;
       let lastError = null;
 
       // Check if user prefers external meta addons
@@ -765,7 +786,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
               for (const addon of externalMetaAddons) {
                 try {
                   const result = await withTimeout(
-                    stremioService.getMetaDetails(type, actualId, addon.id),
+                    stremioService.getMetaDetails(normalizedType, actualId, addon.id),
                     API_TIMEOUT
                   );
                   
@@ -785,7 +806,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
               // If no external addon worked, fall back to catalog addon
               console.log('🔍 [useMetadata] No external meta addon worked, falling back to catalog addon');
               const result = await withTimeout(
-                catalogService.getEnhancedContentDetails(type, actualId, addonId),
+                catalogService.getEnhancedContentDetails(normalizedType, actualId, addonId),
                 API_TIMEOUT
               );
               if (actualId.startsWith('tt')) {
@@ -814,11 +835,13 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           const [content, castData] = await Promise.allSettled([
             // Load content with timeout and retry
             withRetry(async () => {
+              console.log('⚡ [useMetadata] Calling catalogService.getEnhancedContentDetails...');
               console.log('🔍 [useMetadata] Calling catalogService.getEnhancedContentDetails:', { type, actualId, addonId });
               const result = await withTimeout(
-                catalogService.getEnhancedContentDetails(type, actualId, addonId),
+                catalogService.getEnhancedContentDetails(normalizedType, actualId, addonId),
                 API_TIMEOUT
               );
+              console.log('✅ [useMetadata] catalogService returned:', result ? 'DATA' : 'NULL');
               // Store the actual ID used (could be IMDB)
               if (actualId.startsWith('tt')) {
                 setImdbId(actualId);
@@ -855,13 +878,13 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           console.log('🔍 [useMetadata] Original TMDB ID failed, trying ID conversion fallback');
           const tmdbRaw = id.split(':')[1];
           try {
-            const stremioId = await catalogService.getStremioId(type === 'series' ? 'tv' : 'movie', tmdbRaw);
+            const stremioId = await catalogService.getStremioId(normalizedType === 'series' ? 'tv' : 'movie', tmdbRaw);
             if (stremioId && stremioId !== id) {
               console.log('🔍 [useMetadata] Trying converted ID:', { originalId: id, convertedId: stremioId });
               const [content, castData] = await Promise.allSettled([
                 withRetry(async () => {
                   const result = await withTimeout(
-                    catalogService.getEnhancedContentDetails(type, stremioId, addonId),
+                    catalogService.getEnhancedContentDetails(normalizedType, stremioId, addonId),
                     API_TIMEOUT
                   );
                   if (stremioId.startsWith('tt')) {
@@ -916,9 +939,25 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
               if (finalTmdbId) setTmdbId(finalTmdbId);
             }
 
+            // If the addon returned an imdb_id in its metadata (e.g. Kitsu addon), set it now.
+            // This ensures imdbId state is populated for Trakt scrobbling even without TMDB enrichment.
+            if (!imdbId && (finalMetadata as any).imdb_id) {
+              const resolvedImdb = (finalMetadata as any).imdb_id as string;
+              setImdbId(resolvedImdb);
+              // Also resolve tmdbId from the imdb_id if we still don't have it
+              if (!finalTmdbId) {
+                const foundTmdbId = await tmdbSvc.findTMDBIdByIMDB(resolvedImdb);
+                if (foundTmdbId) {
+                  finalTmdbId = foundTmdbId;
+                  setTmdbId(foundTmdbId);
+                  setMetadata(prev => prev ? { ...prev, tmdbId: foundTmdbId } : null);
+                }
+              }
+            }
+
             if (finalTmdbId) {
               const lang = settings.useTmdbLocalizedMetadata ? (settings.tmdbLanguagePreference || 'en') : 'en';
-              if (type === 'movie') {
+              if (normalizedType === 'movie') {
                 const localized = await tmdbSvc.getMovieDetails(String(finalTmdbId), lang);
                 if (localized) {
                   const movieDetailsObj = {
@@ -995,7 +1034,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           if (settings.enrichMetadataWithTMDB && settings.tmdbEnrichLogos) {
             const tmdbService = TMDBService.getInstance();
             const preferredLanguage = settings.tmdbLanguagePreference || 'en';
-            const contentType = type === 'series' ? 'tv' : 'movie';
+            const contentType = normalizedType === 'series' ? 'tv' : 'movie';
 
             // Get TMDB ID
             let tmdbIdForLogo = null;
@@ -1064,7 +1103,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           }
           return updated;
         });
-        cacheService.setMetadata(id, type, finalMetadata);
+        cacheService.setMetadata(id, normalizedType, finalMetadata);
         (async () => {
           const items = await catalogService.getLibraryItems();
           const isInLib = items.some(item => item.id === id);
@@ -1581,10 +1620,10 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           // Convert TMDB ID to IMDb ID for Stremio addons (they expect IMDb format)
           try {
             let externalIds = null;
-            if (type === 'movie') {
+            if (normalizedType === 'movie') {
               const movieDetails = await withTimeout(tmdbService.getMovieDetails(tmdbId), API_TIMEOUT);
               externalIds = movieDetails?.external_ids;
-            } else if (type === 'series') {
+            } else if (normalizedType === 'series') {
               externalIds = await withTimeout(tmdbService.getShowExternalIds(parseInt(tmdbId)), API_TIMEOUT);
             }
 
@@ -1813,7 +1852,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
             return false;
           });
 
-        const requestedEpisodeType = type;
+        const requestedEpisodeType = normalizedType;
         let streamAddons = pickStreamCapableAddons(requestedEpisodeType);
         
         if (streamAddons.length === 0) {
@@ -1901,13 +1940,16 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
 
         const cleanEpisodeId = episodeId.replace(/^series:/, '');
         const parts = cleanEpisodeId.split(':');
+        // Check the episode ID's own namespace, not the show-level id.
+        // e.g. show id may be "tt12343534" but episodeId may be "kitsu:48363:8"
+        const episodeIsImdb = parts[0].startsWith('tt');
 
-        if (isImdb && parts.length === 3) {
+        if (episodeIsImdb && parts.length === 3) {
           // Format: ttXXX:season:episode
           showIdStr = parts[0];
           seasonNum = parts[1];
           episodeNum = parts[2];
-        } else if (!isImdb && parts.length === 3) {
+        } else if (!episodeIsImdb && parts.length === 3) {
           // Format: prefix:id:episode (no season for MAL/Kitsu/etc)
           showIdStr = `${parts[0]}:${parts[1]}`;
           episodeNum = parts[2];
@@ -1993,16 +2035,18 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
         }
         if (__DEV__) console.log('✅ [loadEpisodeStreams] Converted to TMDB ID:', tmdbId);
 
-        // Ensure consistent format
-        // Ensure consistent format or fallback to episodeId if parsing failed
-        // This handles cases where 'tt' is used for a unique episode ID directly
+        // Ensure consistent format or fallback to episodeId if parsing failed.
+        // If the episode's namespace differs from the show's tt id (e.g. kitsu:48363:8
+        // on a tt-identified show), use showIdStr so we request via the correct namespace.
         if (!seasonNum && !episodeNum) {
           stremioEpisodeId = episodeId;
         } else if (!seasonNum) {
-          // No season (e.g., mal:57658:1) - use id:episode format
-          stremioEpisodeId = `${id}:${episodeNum}`;
+          // No season (e.g., kitsu:48363:8, mal:57658:1)
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${episodeNum}`;
         } else {
-          stremioEpisodeId = `${id}:${seasonNum}:${episodeNum}`;
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${seasonNum}:${episodeNum}`;
         }
         if (__DEV__) console.log('🔧 [loadEpisodeStreams] Normalized episode ID for addons:', stremioEpisodeId);
       } else {
@@ -2013,12 +2057,17 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           // Remove 'series:' prefix if present to be safe, though parsing logic above usually handles it
           stremioEpisodeId = episodeId.replace(/^series:/, '');
         } else if (!seasonNum) {
-          // No season (e.g., mal:57658:1) - use id:episode format
-          stremioEpisodeId = `${id}:${episodeNum}`;
+          // No season (e.g., kitsu:12345:1, mal:57658:1) - use showIdStr:episode format.
+          // Use showIdStr (parsed from episodeId) rather than outer `id` so that when the
+          // show has multiple IDs (e.g. tvdb+kitsu), we preserve the namespace that the
+          // episode actually belongs to (e.g. kitsu:animeId:epNum, not tvdb:showId:epNum).
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${episodeNum}`;
         } else {
-          stremioEpisodeId = `${id}:${seasonNum}:${episodeNum}`;
+          const baseId = showIdStr && showIdStr !== id ? showIdStr : id;
+          stremioEpisodeId = `${baseId}:${seasonNum}:${episodeNum}`;
         }
-        if (__DEV__) console.log('ℹ️ [loadEpisodeStreams] Using ID as both TMDB and Stremio ID:', tmdbId);
+        if (__DEV__) console.log('ℹ️ [loadEpisodeStreams] Using ID as both TMDB and Stremio ID:', tmdbId, '| stremioEpisodeId:', stremioEpisodeId);
       }
 
       // Extract episode info from the episodeId for logging
@@ -2030,8 +2079,9 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
       // Start Stremio request using the converted episode ID format
       if (__DEV__) console.log('🎬 [loadEpisodeStreams] Using episode ID for Stremio addons:', stremioEpisodeId);
 
-      const requestedContentType = isCollection ? 'movie' : type;
-      const contentType = requestedContentType;
+      // For collections, treat episodes as individual movies, not series
+      // For other types (e.g. StreamsPPV), preserve the original type unless it's explicitly 'series' logic we want
+      const contentType = isCollection ? 'movie' : type;
       if (__DEV__) console.log(`🎬 [loadEpisodeStreams] Using content type: ${contentType} for ${isCollection ? 'collection' : type}`);
 
       processStremioSource(contentType, stremioEpisodeId, true);
@@ -2094,7 +2144,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
     if (!metadata) return;
 
     if (inLibrary) {
-      catalogService.removeFromLibrary(type, id);
+      catalogService.removeFromLibrary(normalizedType, id);
     } else {
       catalogService.addToLibrary(metadata);
     }
@@ -2173,12 +2223,12 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
     try {
       const tmdbService = TMDBService.getInstance();
       const lang = settings.useTmdbLocalizedMetadata ? (settings.tmdbLanguagePreference || 'en') : 'en';
-      const results = await tmdbService.getRecommendations(type === 'movie' ? 'movie' : 'tv', String(tmdbId), lang);
+      const results = await tmdbService.getRecommendations(normalizedType === 'movie' ? 'movie' : 'tv', String(tmdbId), lang);
 
       // Convert TMDB results to StreamingContent format (simplified)
       const formattedRecommendations: StreamingContent[] = results.map((item: any) => ({
         id: `tmdb:${item.id}`,
-        type: type === 'movie' ? 'movie' : 'series',
+        type: normalizedType === 'movie' ? 'movie' : 'series',
         name: item.title || item.name || 'Untitled',
         poster: tmdbService.getImageUrl(item.poster_path) || 'https://via.placeholder.com/300x450', // Provide fallback
         year: (item.release_date || item.first_air_date)?.substring(0, 4) || 'N/A', // Ensure string and provide fallback
@@ -2196,20 +2246,48 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
   // Fetch TMDB ID if needed and then recommendations
   useEffect(() => {
     const fetchTmdbIdAndRecommendations = async () => {
-      if (!settings.enrichMetadataWithTMDB) {
+      if (!metadata) return;
+
+      const isAnimeId = id.startsWith('kitsu:') || id.startsWith('mal:') || id.startsWith('anilist:');
+
+      // For anime IDs we always try to resolve tmdbId and imdbId regardless of enrichment setting,
+      // because they're needed for Trakt scrobbling even when TMDB enrichment is disabled.
+      if (!settings.enrichMetadataWithTMDB && !isAnimeId) {
         if (__DEV__) console.log('[useMetadata] enrichment disabled; skip TMDB id extraction (extract path)');
         return;
       }
-      if (metadata && !tmdbId) {
+
+      if (!tmdbId) {
         try {
-          const tmdbService = TMDBService.getInstance();
-          const fetchedTmdbId = await tmdbService.extractTMDBIdFromStremioId(id);
+          const tmdbSvc = TMDBService.getInstance();
+          const fetchedTmdbId = await tmdbSvc.extractTMDBIdFromStremioId(id);
           if (fetchedTmdbId) {
             if (__DEV__) console.log('[useMetadata] extracted TMDB id from content id', { id, fetchedTmdbId });
             setTmdbId(fetchedTmdbId);
+
+            // For anime IDs, also resolve the IMDb ID from TMDB external IDs so Trakt can scrobble
+            if (isAnimeId && !imdbId) {
+              try {
+                const externalIds = await tmdbSvc.getShowExternalIds(fetchedTmdbId);
+                if (externalIds?.imdb_id) {
+                  if (__DEV__) console.log('[useMetadata] resolved imdbId for anime via TMDB', { id, imdbId: externalIds.imdb_id });
+                  setImdbId(externalIds.imdb_id);
+                }
+              } catch (e) {
+                if (__DEV__) console.warn('[useMetadata] could not resolve imdbId from TMDB for anime ID', { id });
+              }
+            }
+
+            if (!settings.enrichMetadataWithTMDB) {
+              // Enrichment is disabled but we still resolved tmdbId for Trakt scrobbling.
+              // Set it on the metadata object so the player can read it via metadata.tmdbId.
+              setMetadata(prev => prev ? { ...prev, tmdbId: fetchedTmdbId } : null);
+              return;
+            }
+
             // Fetch certification only if granular setting is enabled
             if (settings.tmdbEnrichCertification) {
-              const certification = await tmdbService.getCertification(type, fetchedTmdbId);
+              const certification = await tmdbSvc.getCertification(normalizedType, fetchedTmdbId);
               if (certification) {
                 if (__DEV__) console.log('[useMetadata] fetched certification via TMDB id (extract path)', { type, fetchedTmdbId, certification });
                 setMetadata(prev => prev ? {
@@ -2282,7 +2360,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           return;
         }
         const tmdbSvc = TMDBService.getInstance();
-        const cert = await tmdbSvc.getCertification(type, tmdbId);
+        const cert = await tmdbSvc.getCertification(normalizedType, tmdbId);
         if (cert) {
           if (__DEV__) console.log('[useMetadata] fetched certification (attach path)', { type, tmdbId, cert });
           setMetadata(prev => prev ? { ...prev, tmdbId, certification: cert } : prev);
@@ -2309,7 +2387,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
       return;
     }
 
-    const contentKey = `${type}-${tmdbId}`;
+    const contentKey = `${normalizedType}-${tmdbId}`;
     if (productionInfoFetchedRef.current === contentKey) {
       return;
     }
@@ -2317,7 +2395,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
     // Only skip if networks are set AND collection is already set (for movies)
     const hasNetworks = !!(metadata as any).networks;
     const hasCollection = !!(metadata as any).collection;
-    if (hasNetworks && (type !== 'movie' || hasCollection)) {
+    if (hasNetworks && (normalizedType !== 'movie' || hasCollection)) {
       return;
     }
 
@@ -2340,7 +2418,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
           collectionsEnabled: settings.tmdbEnrichCollections
         });
 
-        if (type === 'series') {
+        if (normalizedType === 'series') {
           // Fetch networks and additional details for TV shows
           const lang = settings.useTmdbLocalizedMetadata ? (settings.tmdbLanguagePreference || 'en') : 'en';
           const showDetails = await tmdbService.getTVShowDetails(tmdbId, lang);
@@ -2389,7 +2467,7 @@ export const useMetadata = ({ id, type, addonId }: UseMetadataProps): UseMetadat
               }));
             }
           }
-        } else if (type === 'movie') {
+        } else if (normalizedType === 'movie') {
           // Fetch production companies and additional details for movies
           const lang = settings.useTmdbLocalizedMetadata ? (settings.tmdbLanguagePreference || 'en') : 'en';
           const movieDetails = await tmdbService.getMovieDetails(String(tmdbId), lang);
